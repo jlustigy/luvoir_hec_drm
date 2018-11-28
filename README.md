@@ -1,2 +1,2 @@
 # luvoir_hec_drm
-LUVOIR Habitable Exoplanet Characterization DRM
+Large aperture UV, Optical and InfraRed (LUVOIR) Habitable Exoplanet Characterization (HEC) Design Reference Mission (DRM)
