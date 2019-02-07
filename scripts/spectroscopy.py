@@ -59,6 +59,20 @@ HERE = os.path.abspath(os.path.split(__file__)[0])
 CHANNELS = ["UV", "vis", "NIR"]
 LAMHR, AHR, FSTAR = cg.get_earth_reflect_spectrum()
 
+################################################################################
+# HEC DRM CLASS
+################################################################################
+
+class HEC_DRM(object):
+    """
+    """
+    def __init__(self, ):
+        return
+
+
+################################################################################
+# SUPPORT FUNCTIONS
+################################################################################
 def default_luvoir(architecture = "A", channel = "vis"):
     """
     Returns the :class:`coronagraph.Telescope` for the `architecture` and
@@ -487,10 +501,13 @@ def prep_ith_star(cn, i):
     cn.star.Rs = STARPROPS['rads'][imatch]
 
     # Calculate the Earth-equivalent insolation distance
-    a_eeq = np.sqrt(STARPROPS['lums'][imatch])
+    #a_eeq = np.sqrt(STARPROPS['lums'][imatch])
+
+    # Calculate the semi-major axis for the inner edge (Kopparapu et al. 2013)
+    a_in = calc_dist(STARPROPS['lums'][imatch], calc_seff(STARPROPS['temps'][imatch], S0_inner, inner_edge))
 
     # Set semi-major axis
-    cn.planet.a = a_eeq
+    cn.planet.a = a_in
 
     # Set stellar spectrum based on type
     # Calculate stellar flux at TOA assuming a blackbody
@@ -500,6 +517,17 @@ def prep_ith_star(cn, i):
     # Run count rates
     cn.run_count_rates(AHR, LAMHR, Fs)
 
+    return cn
+
+def set_fiducial_earth(cn, distance = 5.0, a = 1.0, Rs = 1.0, Teff = 5780.):
+    """
+    Set :class:``coronagraph.CornagraphNoise`` parameters for an Earth-Sun
+    analog
+    """
+    cn.planet.distance = distance
+    cn.planet.a = a
+    cn.star.Rs = Rs
+    cn.star.Teff = Teff
     return cn
 
 def calculate_bandpass_edges(lammin, lammax, bandwidth = 0.2):
@@ -570,15 +598,15 @@ def apply_two_channels(t_chan):
 
     return t_tot
 
-def complete_spectrum_time(cn, Ahr_flat = 0.1618, wantSNR = 5.0, plot = False, verbose = False):
+def complete_spectrum_time(cn, Ahr_flat = 0.25, wantSNR = 10.0, bandwidth = 0.2,
+                           architecture = "A", plot = False, verbose = False):
     """
     Time for a complete spectrum
 
     Parameters
     ----------
     Ahr_flat : float
-        Flat albedo spectrum (default is the median Earth
-        spectrum between 0.2 - 1.8 um)
+        Flat albedo spectrum
     wanrSNR : float
         Desired SNR on spectrum
     plot : bool
@@ -606,11 +634,15 @@ def complete_spectrum_time(cn, Ahr_flat = 0.1618, wantSNR = 5.0, plot = False, v
     Nbands_per_chan = np.zeros(len(CHANNELS))
     t_per_band_per_chan = []
     full_lam = []
+    full_dlam = []
     full_Cobs = []
     full_Cratio = []
     full_Csig = []
     pct_obs_iwa = []
     lammax_obs_iwa = []
+    lam_extrema = []
+
+    ibp = 0
 
     # Loop over telescope channels
     for j, channel in enumerate(CHANNELS):
@@ -618,13 +650,16 @@ def complete_spectrum_time(cn, Ahr_flat = 0.1618, wantSNR = 5.0, plot = False, v
         t_tmp = []
 
         # Get the channel specific telescope parameters
-        luvoir = default_luvoir(channel=channel)
+        luvoir = default_luvoir(channel=channel, architecture=architecture)
         cn.telescope = luvoir
 
         if verbose: print(channel, luvoir.lammin, luvoir.lammax)
 
+        lam_extrema.append(luvoir.lammin)
+        lam_extrema.append(luvoir.lammax)
+
         # Calculate the bandpass edges
-        edges = calculate_bandpass_edges(luvoir.lammin, luvoir.lammax, bandwidth = 0.2)
+        edges = calculate_bandpass_edges(luvoir.lammin, luvoir.lammax, bandwidth = bandwidth)
 
         # Calculate the number of bandpasses
         Nbands = len(edges) - 1
@@ -650,6 +685,10 @@ def complete_spectrum_time(cn, Ahr_flat = 0.1618, wantSNR = 5.0, plot = False, v
             cn.telescope.lammin = lammin
             cn.telescope.lammax = lammax
 
+            if channel == "UV":
+                cn.telescope.lam = np.array([lammid])
+                cn.telescope.dlam = np.array([lammax - lammin])
+
             # Set spectrum to use for exposure time calcs
             # Using flat spectrum so not biased by bottom of bands
             Ahr_flat  = Ahr_flat * np.ones(len(LAMHR))
@@ -673,14 +712,15 @@ def complete_spectrum_time(cn, Ahr_flat = 0.1618, wantSNR = 5.0, plot = False, v
             # Plot
             if plot:
                 ax.axvspan(lammin, lammax, alpha = 0.2, color = cc[j])
-                ax.plot(cn.lam, cn.Cratio, ls = "steps-mid", color = "grey", zorder = 100)
-                ax.errorbar(cn.lam, cn.Cobs, yerr=cn.Csig, fmt = "o", ms = 2.0, alpha = 0.7, color = "k")
+                #ax.plot(cn.lam, cn.Cratio, ls = "steps-mid", color = "grey", zorder = 100)
+                ax.errorbar(cn.lam, cn.Cobs, yerr=cn.Csig, fmt = "o", ms = 2.0, alpha = 0.7, color = "k", zorder = 70)
                 ax.set_xlabel("Wavelength [$\mu$m]")
                 ax.set_ylabel("$F_p / F_s$")
 
             # Save values
             t_tmp.append(t_ref_lam)
             full_lam.append(cn.lam)
+            full_dlam.append(cn.dlam)
             full_Cratio.append(cn.Cratio)
             full_Cobs.append(cn.Cobs)
             full_Csig.append(cn.Csig)
@@ -689,14 +729,30 @@ def complete_spectrum_time(cn, Ahr_flat = 0.1618, wantSNR = 5.0, plot = False, v
             if np.isfinite(t_ref_lam):
                 t_chan[j] += t_ref_lam
 
+            ibp += 1
+
         # Save tmp times per band
         t_per_band_per_chan.append(t_tmp)
 
     # Deal with the "two channels at a time" thing
     t_tot = apply_two_channels(t_chan)
 
-    spectrum = (np.array(full_lam), np.array(full_Cratio), np.array(full_Cobs), np.array(full_Csig))
+    spectrum = (np.array(full_lam),
+                np.array(full_dlam),
+                np.array(full_Cratio),
+                np.array(full_Cobs),
+                np.array(full_Csig))
     iwa = (pct_obs_iwa, lammax_obs_iwa)
+
+    if plot:
+        lam_extrema = np.array(lam_extrema)
+        cn.telescope.lammin = np.min(lam_extrema)
+        cn.telescope.lammax = np.max(lam_extrema)
+        cn.telescope.resolution = 140.
+        # Re-do count rate calcs for true Earth spectrum
+        cn.run_count_rates(AHR, LAMHR, FSTAR)
+        ax.plot(cn.lam, cn.Cratio, color = "grey", zorder = 80, lw = 3.0)
+        ax.plot(cn.lam, cn.Cratio, color = "w", zorder = 80, lw = 2.0)
 
     return t_tot, t_per_band_per_chan, spectrum, iwa
 
@@ -732,7 +788,7 @@ def calc_dtdc(tpbpcs, specs):
         for j in range(Nbs):
 
             # Calculate delta completeness: fractional increase in completeness from observing this band
-            dcomp[i,j] = (specs[i][0][j][-1] - specs[i][0][j][0]) / np.sum(deltas)
+            dcomp[i,j] = (specs[i][0][j][-1] - specs[i][0][j][0] + np.mean(specs[i][1][j][:])) / np.sum(deltas)
 
     # Calculate d(exposure time) / d(completeness)
     dtdc = dtpb / dcomp
@@ -761,14 +817,13 @@ def calc_dtdc_star(tpbpc0, spec):
     dtpb = np.hstack(tpbpc0)
 
     Nbs = len(dtpb)
-
     dcomp = np.zeros(Nbs) # completeness
     dtdc = np.zeros(Nbs)  # d(time) / d(completeness)
 
     for j in range(Nbs):
 
         # Calculate delta completeness: fractional increase in completeness from observing this band
-        dcomp[j] = (spec[0][j][-1] - spec[0][j][0]) / np.sum(deltas)
+        dcomp[j] = (spec[0][j][-1] - spec[0][j][0] + np.mean(spec[1][j][:])) / np.sum(deltas)
 
     # Calculate d(exposure time) / d(completeness)
     dtdc = dtpb / dcomp
@@ -790,6 +845,37 @@ def calc_t_chan(tpbpc):
     return t_chan_new
 
 def remove_worst_bandpass(tpbpc0, spec):
+    """
+    Based on d(exposure time)/d(completeness)
+    """
+
+    # Make a copy
+    new_tpbpc = copy.deepcopy(tpbpc0)
+
+    # Calculate exptime derivatives
+    dtpb, dcomp, dtdc = calc_dtdc_star(new_tpbpc, spec)
+
+    # Calculate the largest finite dt/dc derivative
+    maxderiv = np.max(dtdc[np.isfinite(dtdc)])
+    imax = np.argmin(np.fabs(dtdc - maxderiv))
+
+    modcomp = dcomp[imax]
+    modtime = dtpb[imax]
+
+    # Set the time per band to nan to effectively remove it
+    icount = 0
+    for ix in range(len(new_tpbpc)):
+        #print("ix", ix)
+        for iy in range(len(new_tpbpc[ix])):
+            #print("iy", iy)
+            if icount == imax:
+                #print(icount)
+                new_tpbpc[ix][iy] = np.inf
+            icount += 1
+
+    return new_tpbpc, modtime, modcomp, maxderiv
+
+def remove_worst_texp_bandpass(tpbpc0, spec):
     """
     """
 
