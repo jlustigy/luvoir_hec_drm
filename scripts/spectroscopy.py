@@ -65,9 +65,334 @@ LAMHR, AHR, FSTAR = cg.get_earth_reflect_spectrum()
 
 class HEC_DRM(object):
     """
+    Object for running instances of the LUVOIR Habitable Exoplanet
+    Characterization Design Reference Mission (DRM)
+
+    Parameters
+    ----------
+    wantSNR : float
+        Desired SNR in each spectral element
+    wantexp : float
+        Desired duration of exo-earth program [days]
+    Ahr_flat : float
+        Flat planet albedo to use for SNR/exposure time estimates
+    eta_int : float
+        Fraction of targets in biased sample that appear to be habitable/interesting
+    bandwidth : float
+        Coronagraph bandpass bandwidth (:math:`\Delta \lambda / \lambda`)
+    architecture : str
+        LUVOIR architecture ("A" or "B")
     """
-    def __init__(self, ):
+    def __init__(self, wantSNR=8.5, wantexp=365., Ahr_flat=0.20,
+                 eta_int=0.1, bandwidth=0.2, architecture="B"):
+
+        # Set initial attributes
+        self.wantSNR = wantSNR
+        self.wantexp = wantexp
+        self.Ahr_flat = Ahr_flat
+        self.eta_int = eta_int
+        self.bandwidth = bandwidth
+        self.architecture = architecture
+
+        # Read-in biased stellar catalog based on architecture
+        self.STARS = read_luvoir_stars(path = os.path.join(HERE, '../inputs/luvoir-%s_stars.txt' %architecture)
+        biased_sample = self.STARS
+        self.NBIAS = len(biased_sample["dist"])
+
+        # Calculate the number of draws based on eta_int
+        self.Ndraw = np.round(self.eta_int * self.NBIAS)
+
+        # Create coronagraph noise object for calculations
+        self.cn = cg.CoronagraphNoise()
+
         return
+
+    def generate_exptime_table(self, ):
+        """
+        """
+
+        # Perform calculation for all stars in biased sample
+        Ndraw = self.NBIAS
+
+        np.random.seed(seed=None)
+
+        # Allocate memory for exposure times
+        t_tots = np.zeros(Ndraw)
+        tpbpcs = []
+        pct_obs_iwas = []
+        lammax_obs_iwas = []
+        specs = []
+
+        """
+        Calculate the exposure times and spectra in each bandpass for each
+        star in biased sample
+        """
+
+        # Loop over stars in this sample
+        for i in range(Ndraw):
+            #print("HIP %i, %.2f pc, %s " %(hip[i], dist[i], stype[i]))
+
+            # Set system parameters for this star
+            self.cn = prep_ith_star(self.cn, i)
+
+            # Calculate the time to observe the complete spectrum
+            t_tots[i], tpbpc, spectrum, iwa = complete_spectrum_time(self.cn, plot=False,
+                                                                     wantSNR = self.wantSNR,
+                                                                     Ahr_flat = self.Ahr_flat,
+                                                                     bandwidth = self.bandwidth,
+                                                                     architecture = self.architecture)
+
+
+            tpbpcs.append(tpbpc)
+            pct_obs_iwas.append(iwa[0])
+            specs.append(spectrum)
+
+        # Calculate channel widths
+        deltas = []
+        for channel in CHANNELS:
+            l = default_luvoir(channel=channel)
+            deltas.append(l.lammax - l.lammin)
+        self.deltas = np.array(deltas)
+
+        # Calculate channel fractional completeness
+        self.channel_weights = (self.deltas / np.sum(self.deltas))
+
+        # Calculate completeness for each star in sample
+        self.completeness = np.sum(np.array(pct_obs_iwas) * self.channel_weights, axis = 1)
+
+        """
+        Make a Lookup Table of Exposure times for each star in sample
+        """
+
+        tpbpcs_rect = []    # Time per bandpass
+        tpcs_rect = []      # Time per channel
+
+        # Loop over all the stars in sample
+        for idrew in range(self.NBIAS):
+
+            tpbpcs_rect.append([])
+            tpcs_rect.append([])
+            bp_names = []
+            bp_chan = []
+
+            # Loop over all the LUVOIR channels
+            for ichan in range(len(CHANNELS)):
+
+                tpcs_rect[idrew].append(0.0)
+
+                # Loop over all the bands in this channel
+                for iband in range(len(tpbpcs[0][ichan])):
+
+                    bp_names.append("%s %i" %(CHANNELS[ichan], iband+1))
+                    bp_chan.append(ichan)
+                    tpbpcs_rect[idrew].append(tpbpcs[idrew][ichan][iband])
+                    tpcs_rect[idrew][ichan] += tpbpcs[idrew][ichan][iband]
+
+        # Make np arrays
+        tpbpcs_rect = np.array(tpbpcs_rect)
+        tpcs_rect = np.array(tpcs_rect)
+        bp_names = np.array(bp_names)
+        bp_chan = np.array(bp_chan)
+
+        # Make infs --> nans
+        infmask = ~np.isfinite(tpbpcs_rect)
+        tpbpcs_rect[infmask] = np.nan
+        infmask = ~np.isfinite(tpcs_rect)
+        tpcs_rect[infmask] = np.nan
+
+        # Set attributes
+        self.tpbpcs_rect = tpbpcs_rect
+        self.tpcs_rect = tpcs_rect
+        self.bp_names = bp_names
+        self.bp_chan = bp_chan
+
+        """
+        New completeness calculations
+        """
+
+        bandpasses = []
+
+        # Loop over telescope channels
+        for j, channel in enumerate(CHANNELS):
+
+            # Get the channel specific telescope parameters
+            luvoir = default_luvoir(channel=channel)
+            self.cn.telescope = luvoir
+
+            # Calculate the bandpass edges
+            edges = calculate_bandpass_edges(luvoir.lammin, luvoir.lammax, bandwidth = self.bandwidth)
+
+            # Calculate the number of bandpasses
+            Nbands = len(edges) - 1
+
+            # Loop over bandpasses
+            for i in range(Nbands):
+
+                # Get the max, min, and middle wavelenths for this bandpass
+                lammin = edges[i]
+                lammax = edges[i+1]
+
+                bandpasses.append([lammin, lammax])
+
+        bandpasses = np.array(bandpasses)
+        lmin, lmax = np.min(np.hstack(bandpasses)), np.max(np.hstack(bandpasses))
+
+        # Fractional completeness of each bandpass
+        bp_frac = ((bandpasses[:,1] - bandpasses[:,0]) / (lmax - lmin)) / np.sum((bandpasses[:,1] - bandpasses[:,0]) / (lmax - lmin))
+
+        # Completeness by target
+        tot_completeness = np.sum(np.isfinite(self.tpbpcs_rect) * bp_frac, axis=1)
+
+        # Fraction of stars in biased sample that can completely observe each bandpass
+        frac_bias_bp = np.sum(np.isfinite(tpbpcs_rect)*1.0, axis=0) / self.NBIAS
+
+        # Set attributes
+        self.bandpasses = bandpasses
+        self.bp_frac = bp_frac
+        self.tot_completeness = tot_completeness
+        self.frac_bias_bp = frac_bias_bp
+
+        # Make a pandas table for lookup
+        data = np.vstack([self.biased_sample["hip"],
+                  self.biased_sample["stype"],
+                  self.biased_sample["dist"],
+                  self.tpbpcs_rect.T,
+                  self.tot_completeness])
+        columns = np.hstack(["HIP", "type", "d [pc]", self.bp_names, "Spec. Completeness"])
+        isort = np.argsort(self.tpbpcs_rect[:,6])
+        self.exptime_table = pd.DataFrame(data[:, isort].T, columns=columns)
+
+        return
+
+    def run_hec_drm(self, Ndraw = 5, wantexp_days = 365., verbose = True,
+                    iremove = [], wantSNR_grid = None):
+        """
+        Run the LUVOIR Habitable Exoplanet Characterization (HEC) Design Reference Mission (DRM).
+
+        Parameters
+        ----------
+        Ndraw : int
+            Number of stars drawn out of the total biased sample of habitable Earth-like candidates
+        wantexp_days : float
+            Number of days willing to spend on science time for this program
+        wantSNR_grid : list or numpy.array
+            Desired SNR in each band; calculated via scaling from original ``wantSNR_grid``
+            (must satisfy: ``len(wantSNR_grid) == len(bp_chan)``)
+        iremove : list
+            Indices of bandpasses to remove
+        verbose : bool
+            Use print statements? Good for a single example
+
+        Returns
+        -------
+        """
+
+        # Construct mask for bands we're keeping
+        val = []
+        for i in range(len(self.bp_names)):
+            if i in iremove:
+                val.append(False)
+            else:
+                val.append(True)
+        val = np.array(val)
+
+        # Randomly draw stellar sample indices
+        idraw = np.random.choice(np.arange(self.NBIAS), size=Ndraw, replace=False)
+
+        # Scale SNRs if need be
+        if wantSNR_grid is not None:
+            SNRfactor = (wantSNR_grid / self.wantSNR)**2
+        else:
+            SNRfactor = np.ones(self.tpbpcs_rect.shape[1])
+
+        # Get exptimes for each star drawn
+        tpbpcs_draws = SNRfactor*self.tpbpcs_rect[idraw, :]
+
+        t_sci = np.zeros(Ndraw) # was t_tot
+        c_tot = np.zeros(Ndraw)
+        t_ovr = np.zeros(Ndraw)
+
+        # Loop over targets
+        for i in range(Ndraw):
+
+            # Science exposure times in each channel
+            t_uv = np.nansum(tpbpcs_draws[i, val & (self.bp_chan == 0)])
+            t_vis = np.nansum(tpbpcs_draws[i, val & (self.bp_chan == 1)])
+            t_nir = np.nansum(tpbpcs_draws[i, val & (self.bp_chan == 2)])
+
+            # Total exposure time
+            t_sci[i] = apply_two_channels(np.array([t_uv, t_vis, t_nir]))
+
+            # OVERHEADS
+            ## 1 hour for slew + dynamic settle + thermal settle
+            slew_settle_time = 1.0
+            ## 0.6 for A (1.25 for B) hours for digging initial dark hole
+            if architecture == "A":
+                initial_dark_hole_tax = 0.6
+            elif architecture == "B":
+                initial_dark_hole_tax = 1.25
+            else:
+                initial_dark_hole_tax = np.nan
+            ## GUESS: apply initial dark hole tax to each bandpass (flat tax * number of bandpasses used)
+            dark_hole_time = initial_dark_hole_tax * np.sum(np.isfinite(tpbpcs_draws[i, val]))
+            ## 10% science time tax per iteration of wavefront control
+            Nwfc = 1.0   # Assuming one iteration
+            fwfc = 0.1 * Nwfc
+            ## GUESS: apply WFC science tax to total science time after accounting for simultaneous observations in two channels
+            wfc_time = fwfc * t_sci[i]
+            ## Sum up the overheads
+            t_ovr[i] = slew_settle_time + dark_hole_time + wfc_time
+
+            # Completeness = initial completeness - fraction contributed from removed bands
+            mask = np.isfinite(tpbpcs_draws[i, :]) & ~val
+            c_tot[i] = self.tot_completeness[idraw[i]] - np.sum(self.bp_frac[mask])
+
+            # Print?
+            if verbose:
+                print("HIP%s - %s - %.2fpc" %(self.biased_sample["hip"][idraw[i]], self.biased_sample["stype"][idraw[i]], self.biased_sample["dist"][idraw[i]]))
+                print("    - %.1f%% Complete Spectrum : %.2f days" %(c_tot[i] * 100., t_sci[i] / 24.))
+                print("    - UV Spectrum : %.2f days" %(t_uv / 24.))
+                print("    - Optical Spectrum : %.2f days" %(t_vis / 24.))
+                print("    - NIR Spectrum : %.2f days" %(t_nir / 24.))
+                print("    - Overhead %.2f days" %(t_ovr[i] / 24.))
+                #print("    - O2 0.76 um : %.2f days" %(tpmbs[idraw[i],0,0] / 24.))
+                #print("    - O3 0.6 um : %.2f days" %(tpmbs[idraw[i],1,0] / 24.))
+
+        # Sum science time and overheads
+        t_tot = t_sci + t_ovr
+
+        # Calculate total science exposure time for all Ndraw targets
+        t_sci_sum = np.sum(t_sci)
+
+        # Calculate total overhead time for all Ndraw targets
+        t_ovr_sum = np.sum(t_ovr)
+
+        # Calculate total science + overhead time for all Ndraw targets
+        t_tot_sum = np.sum(t_tot)
+
+        # Prioritize targets for fixed desired exposure time
+        isort = np.argsort(t_tot)
+        t_tot_cumsum = np.cumsum(t_tot[isort])
+        viable = (t_tot_cumsum / 24.) < wantexp_days
+        count_in_texp = np.sum(viable)
+        if count_in_texp > 0:
+            texp_for_count = t_tot_cumsum[viable][-1] / 24
+        else:
+            texp_for_count = 0
+
+        if verbose:
+            print("---------------------FINAL TALLY---------------------")
+            print("%.2f yrs for %i target's complete spectra with overheads (SNR=%.1f)" %(t_tot_sum / (24. * 356.), Ndraw, self.wantSNR))
+            print("%.2f yrs for %i target's complete spectra just science time (SNR=%.1f)" %(t_sci_sum / (24. * 356.), Ndraw, self.wantSNR))
+            print("%.2f yrs for %i target's complete spectra just overheads (SNR=%.1f)" %(t_ovr_sum / (24. * 356.), Ndraw, self.wantSNR))
+            print("%.2f yrs for %i target's UV spectra (SNR=%.1f)" %(np.nansum(tpbpcs_draws[:, val & (bp_chan == 0)]) / (24. * 356.), Ndraw, self.wantSNR))
+            print("%.2f yrs for %i target's optical spectra (SNR=%.1f)" %(np.nansum(tpbpcs_draws[:, val & (bp_chan == 1)]) / (24. * 356.), Ndraw, self.wantSNR))
+            print("%.2f yrs for %i target's NIR spectra (SNR=%.1f)" %(np.nansum(tpbpcs_draws[:, val & (bp_chan == 2)]) / (24. * 356.), Ndraw, self.wantSNR))
+            #print("%.2f yrs for %i target's O2 at 0.76 um (SNR=%i)" %(np.nansum(tpmbs[idraw,0,0]) / (24. * 356.), Ndraw, wantSNR_bands))
+            #print("%.2f yrs for %i target's O3 at 0.6 um (SNR=%i)" %(np.nansum(tpmbs[idraw,1,0]) / (24. * 356.), Ndraw, wantSNR_bands))
+            print("%i spectra in %i days (%i desired for program)" %(count_in_texp, texp_for_count, wantexp_days))
+
+        return t_tot[isort], count_in_texp, c_tot[isort], tpbpcs_draws[isort, :], t_sci[isort], t_ovr[isort]
 
 
 ################################################################################
@@ -131,9 +456,9 @@ def default_luvoir(architecture = "A", channel = "vis"):
         telescope.OWA = 64.
         telescope.qe = 0.9 * 0.75   # Detector QE * charge transfer term
         if channel.lower() == "vis".lower():
-            telescope.IWA = 3.5
+            telescope.IWA = 2.0
             telescope.resolution = 140.
-            telescope.throughput = 0.20
+            telescope.throughput = 0.48
             telescope.darkcurrent = 3e-5
             telescope.readnoise = 0.0
             telescope.lammin = 0.515
@@ -142,16 +467,16 @@ def default_luvoir(architecture = "A", channel = "vis"):
         elif channel.lower() == "UV".lower():
             telescope.IWA = 4.0
             telescope.resolution = 7.
-            telescope.throughput = 0.20
+            telescope.throughput = 0.48
             telescope.darkcurrent = 3e-5
             telescope.readnoise = 0.0
             telescope.lammin = 0.200
             telescope.lammax = 0.525
             telescope.Rc = 1.3e-3
         elif channel.lower() == "NIR".lower():
-            telescope.IWA = 3.5
+            telescope.IWA = 2.0
             telescope.resolution = 70.
-            telescope.throughput = 0.20
+            telescope.throughput = 0.48
             telescope.darkcurrent = 2e-3
             telescope.readnoise = 2.5
             telescope.lammin = 1.00
@@ -598,8 +923,8 @@ def apply_two_channels(t_chan):
 
     return t_tot
 
-def complete_spectrum_time(cn, Ahr_flat = 0.25, wantSNR = 10.0, bandwidth = 0.2,
-                           architecture = "A", plot = False, verbose = False):
+def complete_spectrum_time(cn, Ahr_flat = 0.2, wantSNR = 10.0, bandwidth = 0.2, architecture = "A",
+                           plot = False, verbose = False):
     """
     Time for a complete spectrum
 
@@ -607,8 +932,8 @@ def complete_spectrum_time(cn, Ahr_flat = 0.25, wantSNR = 10.0, bandwidth = 0.2,
     ----------
     Ahr_flat : float
         Flat albedo spectrum
-    wanrSNR : float
-        Desired SNR on spectrum
+    wanrSNR : float or array-like
+        Desired SNR on spectrum (per bandpass if array-like)
     plot : bool
         Produce a plot?
     verbose : bool
@@ -626,6 +951,14 @@ def complete_spectrum_time(cn, Ahr_flat = 0.25, wantSNR = 10.0, bandwidth = 0.2,
         (pct_obs_iwa, lammax_obs_iwa)
 
     """
+
+    # If the coronagraph model has already been run...
+    if cn._computed:
+        # Use the existing stellar flux
+        fstar = cn.solhr
+    else:
+        # Otherwise use the solar flux
+        fstar = FSTAR
 
     if plot: fig, ax = plt.subplots()
 
@@ -650,7 +983,7 @@ def complete_spectrum_time(cn, Ahr_flat = 0.25, wantSNR = 10.0, bandwidth = 0.2,
         t_tmp = []
 
         # Get the channel specific telescope parameters
-        luvoir = default_luvoir(channel=channel, architecture=architecture)
+        luvoir = default_luvoir(channel=channel, architecture = architecture)
         cn.telescope = luvoir
 
         if verbose: print(channel, luvoir.lammin, luvoir.lammax)
@@ -666,15 +999,25 @@ def complete_spectrum_time(cn, Ahr_flat = 0.25, wantSNR = 10.0, bandwidth = 0.2,
         Nbands_per_chan[j] = Nbands
 
         # Run count rates (necessary to generate new wavelength grid)
-        cn.run_count_rates(AHR, LAMHR, FSTAR)
+        #cn.run_count_rates(spectroscopy.AHR, spectroscopy.LAMHR, spectroscopy.FSTAR)
+
+        # Get new wavelength grid
+        #l_grid, dl_grid = get_lam_dlam(cn)
 
         # Calculate how much of the spectrum is observable
-        pct, lammax_obs = calc_observable_spectrum(cn)
+        cnc = copy.deepcopy(cn)
+        cnc.run_count_rates(AHR, LAMHR, FSTAR)
+        pct, lammax_obs = calc_observable_spectrum(cnc)
         pct_obs_iwa.append(pct)
         lammax_obs_iwa.append(lammax_obs)
 
         # Loop over bandpasses
         for i in range(Nbands):
+
+            if (type(wantSNR) is float) or (type(wantSNR) is int):
+                wSNR = wantSNR
+            else:
+                wSNR = wantSNR[ibp]
 
             # Get the max, min, and middle wavelenths for this bandpass
             lammin = edges[i]
@@ -694,15 +1037,15 @@ def complete_spectrum_time(cn, Ahr_flat = 0.25, wantSNR = 10.0, bandwidth = 0.2,
             Ahr_flat  = Ahr_flat * np.ones(len(LAMHR))
 
             # Run count rates (necessary to generate new wavelength grid)
-            cn.run_count_rates(Ahr_flat, LAMHR, FSTAR)
+            cn.run_count_rates(Ahr_flat, LAMHR, fstar)
 
             # Calculate exposure times to wantSNR
             etimes = determine_exposure_time(cn, None, plot_snr_curves=False,
-                        plot_spectrum=False, wantSNR=wantSNR, ref_lam = lammid)
+                        plot_spectrum=False, wantSNR=wSNR, ref_lam = lammid)
             t_ref_lam = etimes[-1]
 
             # Re-do count rate calcs for true Earth spectrum
-            cn.run_count_rates(AHR, LAMHR, FSTAR)
+            cn.run_count_rates(AHR, LAMHR, fstar)
 
             # Draw random samples of data for a plot
             cn.make_fake_data(texp=t_ref_lam)
@@ -713,6 +1056,7 @@ def complete_spectrum_time(cn, Ahr_flat = 0.25, wantSNR = 10.0, bandwidth = 0.2,
             if plot:
                 ax.axvspan(lammin, lammax, alpha = 0.2, color = cc[j])
                 #ax.plot(cn.lam, cn.Cratio, ls = "steps-mid", color = "grey", zorder = 100)
+                ax.plot(cn.lam, cn.Cobs, "o", ms = 3.0, alpha = 1.0, color = "w", zorder = 70)
                 ax.errorbar(cn.lam, cn.Cobs, yerr=cn.Csig, fmt = "o", ms = 2.0, alpha = 0.7, color = "k", zorder = 70)
                 ax.set_xlabel("Wavelength [$\mu$m]")
                 ax.set_ylabel("$F_p / F_s$")
