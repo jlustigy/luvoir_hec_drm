@@ -82,9 +82,12 @@ class HEC_DRM(object):
         Coronagraph bandpass bandwidth (:math:`\Delta \lambda / \lambda`)
     architecture : str
         LUVOIR architecture ("A" or "B")
+    telescope_mods : dict
+        Dictionary of telescope parameters/values to modify from defaults
     """
     def __init__(self, wantSNR=8.5, wantexp=365., Ahr_flat=0.20,
-                 eta_int=0.1, bandwidth=0.2, architecture="B"):
+                 eta_int=0.1, bandwidth=0.2, architecture="A",
+                 telescope_mods={}):
 
         # Set initial attributes
         self.wantSNR = wantSNR
@@ -93,22 +96,375 @@ class HEC_DRM(object):
         self.eta_int = eta_int
         self.bandwidth = bandwidth
         self.architecture = architecture
+        self.telescope_mods = telescope_mods
 
         # Read-in biased stellar catalog based on architecture
-        self.STARS = read_luvoir_stars(path = os.path.join(HERE, '../inputs/luvoir-%s_stars.txt' %architecture)
-        biased_sample = self.STARS
-        self.NBIAS = len(biased_sample["dist"])
+        self.STARS = read_luvoir_stars(path = os.path.join(HERE, '../inputs/luvoir-%s_stars.txt' %architecture))
+        self.biased_sample = self.STARS
+        self.NBIAS = len(self.biased_sample["dist"])
 
         # Calculate the number of draws based on eta_int
-        self.Ndraw = np.round(self.eta_int * self.NBIAS)
+        self.Ndraw = int(np.round(self.eta_int * self.NBIAS))
 
         # Create coronagraph noise object for calculations
-        self.cn = cg.CoronagraphNoise()
+        self.cn = cg.CoronagraphNoise(SILENT = True)
+
+        # Set a fiducial modern earth spectrum for plotting
+        self.LAMHR = LAMHR
+        self.AHR = AHR
+        self.FSTAR = FSTAR
 
         return
 
+    def apply_telescope_mods(self):
+        """
+        Apply modifications to the default telescope parameters using the
+        `telescope_mods` dictionary
+        """
+        for key, val in self.telescope_mods.items():
+            self.cn.telescope.__dict__[key] = val
+        return
+
+    def prep_ith_star(self, i):
+        """
+        Takes an index and returns the object with parameters set for that system.
+
+        Note
+        ----
+        Currently requires a bunch of arrays to exist outside of this functions scope,
+        e.g. `stype`, `dist`, `temps`, `rads`, `lums`
+        """
+
+        # Get index with matching stellar type in stellar properties table
+        imatch = match_stellar_type(self.STARS['stype'][i], verbose = False)
+
+        # Set system distance
+        self.cn.planet.distance = self.STARS['dist'][i]
+
+        # Set stellar temperature
+        self.cn.star.Teff = STARPROPS['temps'][imatch]
+
+        # Set stellar radius
+        self.cn.star.Rs = STARPROPS['rads'][imatch]
+
+        # Calculate the Earth-equivalent insolation distance
+        #a_eeq = np.sqrt(STARPROPS['lums'][imatch])
+
+        # Calculate the semi-major axis for the inner edge (Kopparapu et al. 2013)
+        a_in = calc_dist(STARPROPS['lums'][imatch],
+                         calc_seff(STARPROPS['temps'][imatch], S0_inner, inner_edge))
+
+        # Set semi-major axis
+        self.cn.planet.a = a_in
+
+        # Set stellar spectrum based on type
+        # Calculate stellar flux at TOA assuming a blackbody
+        Fs = cg.noise_routines.Fstar(self.LAMHR, self.cn.star.Teff, self.cn.star.Rs, self.cn.planet.a, AU=True)
+        #Fs = fstar
+
+        # Run count rates
+        self.cn.run_count_rates(self.AHR, self.LAMHR, Fs)
+
+        return
+
+    def determine_exposure_time(self, bandlims, wantSNR = 10.0, wantetime = 5.0, ref_lam = 0.550,
+                                plot_snr_curves = False, plot_spectrum = False,
+                                title = ""):
+        """
+        Determine the exposure time needed to get a desired S/N
+
+        Parameters
+        ----------
+        bandlims : list or tuple
+            Lower and upper wavelength limits to absorption band [microns]
+
+        Returns
+        -------
+        etime_band : float
+            Exposure time to get S/N on band below the continuum
+        etime_bot : float
+            Exposure time to get S/N on spectral element at the bottom of the band
+        etime_cont : float
+            Exposure time to ger S/N on the spectral elements in the continuum nearest to the band
+        """
+
+        # Specify Kat's fiducial S/N
+        iref = np.argmin(np.fabs(cn.lam - ref_lam))
+
+        if bandlims is not None:
+
+            # Specify band via wavelength
+            icont = np.array([np.argmin(np.fabs(cn.lam - bandlims[0])), np.argmin(np.fabs(cn.lam - bandlims[1]))])
+            iband = np.arange(icont[0]+1, icont[1])
+            ibottom = np.argmin(np.fabs(cn.Cratio - np.min(cn.Cratio[iband])))
+
+            # Calculate the continuum planet photon counts and contrast ratio
+            ccont = cg.observe.interp_cont_over_band(cn.lam, cn.cp, icont, iband)
+            ccrat = cg.observe.interp_cont_over_band(cn.lam, cn.Cratio, icont, iband)
+
+        # Calculate various SNRs as a function of exposure time
+        Nt = 1000
+        times = np.linspace(1.0, 100.0, Nt)
+        band_snrs = np.zeros(len(times))
+        bot_snrs = np.zeros(len(times))
+        cont_snrs = np.zeros(len(times))
+        fid_snrs = np.zeros(len(times))
+        for i, time in enumerate(times):
+            cn.make_fake_data(texp = times[i])
+            fid_snrs[i] = cn.SNRt[iref]
+            if bandlims is not None:
+                band_snrs[i] = cg.observe.SNR_band(cn.cp, ccont, cn.cb, iband, itime=times[i])
+                bot_snrs[i] = cn.SNRt[ibottom]
+                cont_snrs[i] = np.mean(cn.SNRt[icont])
+
+        # Fit for time to desired snr value
+        etime_fid = find_time_from_snr(times, fid_snrs, wantSNR) #times[np.argmin(np.fabs(fid_snrs - wantSNR))]
+        if bandlims is not None:
+            etime_band = find_time_from_snr(times, band_snrs, wantSNR) #times[np.argmin(np.fabs(band_snrs - wantSNR))]
+            etime_bot = find_time_from_snr(times, bot_snrs, wantSNR) #times[np.argmin(np.fabs(bot_snrs - wantSNR))]
+            etime_cont = find_time_from_snr(times, cont_snrs, wantSNR) #times[np.argmin(np.fabs(cont_snrs - wantSNR))]
+
+        # Check for incomplete bands which can cause anomalously low exposure times
+        if  bandlims is None:
+            etime_band = np.nan
+            etime_bot = np.nan
+            etime_cont = np.nan
+        else:
+            if (False in np.isfinite(cn.Cobs[iband])):
+                etime_band = np.nan
+
+        # Make plot of SNR vs exposure time
+        if plot_snr_curves:
+
+            fig, ax = plt.subplots(figsize = (8,6))
+            ax.set_xlabel("Exposure Time [hrs]")
+            ax.set_ylabel("S/N")
+            if bandlims is not None:
+                ax.plot(times, band_snrs, label = "detect band rel. to cont.")
+                ax.plot(times, bot_snrs, label = "bottom of band")
+                ax.plot(times, cont_snrs, label = "avg. continuum")
+            ax.plot(times, fid_snrs, label = "at %.2f $\mu$m" %cn.lam[iref])
+            if bandlims is not None:
+                ax.scatter(etime_band, wantSNR, c="C0")
+                ax.scatter(etime_bot, wantSNR, c="C1")
+                ax.scatter(etime_cont, wantSNR, c="C2")
+            ax.scatter(etime_fid, wantSNR, c="C3")
+            ax.axhline(wantSNR, ls = "--", c = "grey")
+            if bandlims is not None:
+                ax.axvline(etime_band, ls = "--", c = "C0")
+                ax.axvline(etime_bot, ls = "--", c = "C1")
+                ax.axvline(etime_cont, ls = "--", c = "C2")
+            ax.axvline(etime_fid, ls = "--", c = "C3")
+            ylims = ax.get_ylim()
+            if bandlims is not None:
+                ax.text(etime_band, ylims[1]-.5*ylims[1], "%.2f" %etime_band, ha = "center", va = "top", fontsize = 12, bbox=dict(facecolor='w', alpha=1.0, ec = "w"), color = "C0")
+                ax.text(etime_bot, ylims[1]-.1*ylims[1], "%.2f" %etime_bot, ha = "center", va = "top", fontsize = 12, bbox=dict(facecolor='w', alpha=1.0, ec = "w"), color = "C1")
+                ax.text(etime_cont, ylims[1]-.15*ylims[1], "%.2f" %etime_cont, ha = "center", va = "top", fontsize = 12, bbox=dict(facecolor='w', alpha=1.0, ec = "w"), color = "C2")
+            ax.text(etime_fid, ylims[1]-.20*ylims[1], "%.2f" %etime_fid, ha = "center", va = "top", fontsize = 12, bbox=dict(facecolor='w', alpha=1.0, ec = "w"), color = "C3")
+            ax.legend(framealpha = 0.75, fontsize = 14)
+
+        if plot_spectrum:
+
+            # Construct noised spectrum plot
+            if bandlims is not None:
+                cn.make_fake_data(texp = etime_band)
+            else:
+                cn.make_fake_data(texp = etime_fid)
+
+            fig, ax = plt.subplots(figsize = (8,6))
+            ax.plot(cn.lam, cn.Cratio, ls = "steps-mid", color = "grey")
+            ax.errorbar(cn.lam, cn.Cobs, yerr=cn.Csig, fmt = "o", ms = 2.0, alpha = 0.7, color = "k")
+            ax.set_xlabel("Wavelength [$\mu$m]")
+            ax.set_ylabel("Fp/Fs")
+            ax.set_title(title)
+
+            if bandlims is not None:
+                # Identify specific points in band
+                for i in icont:
+                    ax.scatter(cn.lam[i], cn.Cratio[i], s = 20.0, c = "C8", marker = "o", zorder = 100)
+                for i in iband:
+                    ax.scatter(cn.lam[i], cn.Cratio[i], s = 20.0, c = "C1", marker = "o", zorder = 100)
+                ax.scatter(cn.lam[ibottom], cn.Cratio[ibottom], s = 20.0, c = "C8", marker = "o", zorder = 100)
+                # Identify specific continuum points in band
+                for i, ic in enumerate(iband):
+                    ax.scatter(cn.lam[ic], ccrat[i], s = 20.0, c = "C9", marker = "o", zorder = 100)
+
+        # Return exposure times
+        return etime_band, etime_bot, etime_cont, etime_fid
+
+    def complete_spectrum_time(self, plot = False, verbose = False):
+        """
+        Time for a complete spectrum
+
+        Parameters
+        ----------
+        plot : bool
+            Produce a plot?
+        verbose : bool
+            Print things?
+
+        Returns
+        -------
+        t_tot : array-like
+            total exposure time
+        t_per_band_per_chan : list
+            time per band per channel
+        spectrum : tuple
+            (lam, dlam, Cratio, Cobs, Csig)
+        iwa : tuple
+            (pct_obs_iwa, lammax_obs_iwa)
+
+        """
+
+        # If the coronagraph model has already been run...
+        if self.cn._computed:
+            # Use the existing stellar flux
+            fstar = self.cn.solhr
+        else:
+            # Otherwise use the solar flux
+            fstar = self.FSTAR
+
+        if plot: fig, ax = plt.subplots()
+
+        cc = ["C0", "C2", "C3"]
+        t_chan = np.zeros(len(CHANNELS))
+        Nbands_per_chan = np.zeros(len(CHANNELS))
+        t_per_band_per_chan = []
+        full_lam = []
+        full_dlam = []
+        full_Cobs = []
+        full_Cratio = []
+        full_Csig = []
+        pct_obs_iwa = []
+        lammax_obs_iwa = []
+        lam_extrema = []
+
+        ibp = 0
+
+        # Loop over telescope channels
+        for j, channel in enumerate(CHANNELS):
+
+            t_tmp = []
+
+            # Get the channel specific telescope parameters
+            luvoir = default_luvoir(channel=channel, architecture = self.architecture)
+            self.cn.telescope = luvoir
+
+            self.apply_telescope_mods()
+
+            if verbose: print(channel, luvoir.lammin, luvoir.lammax)
+
+            lam_extrema.append(luvoir.lammin)
+            lam_extrema.append(luvoir.lammax)
+
+            # Calculate the bandpass edges
+            edges = calculate_bandpass_edges(luvoir.lammin, luvoir.lammax, bandwidth = self.bandwidth)
+
+            # Calculate the number of bandpasses
+            Nbands = len(edges) - 1
+            Nbands_per_chan[j] = Nbands
+
+            # Calculate how much of the spectrum is observable
+            cnc = copy.deepcopy(self.cn)
+            cnc.run_count_rates(self.AHR, self.LAMHR, self.FSTAR)
+            pct, lammax_obs = calc_observable_spectrum(cnc)
+            pct_obs_iwa.append(pct)
+            lammax_obs_iwa.append(lammax_obs)
+
+            # Loop over bandpasses
+            for i in range(Nbands):
+
+                if (type(self.wantSNR) is float) or (type(self.wantSNR) is int):
+                    wSNR = self.wantSNR
+                else:
+                    wSNR = self.wantSNR[ibp]
+
+                # Get the max, min, and middle wavelenths for this bandpass
+                lammin = edges[i]
+                lammax = edges[i+1]
+                lammid = 0.5*(lammax + lammin)
+
+                # Set telescope wavelength range
+                self.cn.telescope.lammin = lammin
+                self.cn.telescope.lammax = lammax
+
+                if channel == "UV":
+                    self.cn.telescope.lam = np.array([lammid])
+                    self.cn.telescope.dlam = np.array([lammax - lammin])
+
+                # Set spectrum to use for exposure time calcs
+                # Using flat spectrum so not biased by bottom of bands
+                Ahr_flat  = self.Ahr_flat * np.ones(len(self.LAMHR))
+
+                # Run count rates (necessary to generate new wavelength grid)
+                self.cn.run_count_rates(Ahr_flat, self.LAMHR, fstar)
+
+                # Calculate exposure times to wantSNR
+                etimes = determine_exposure_time(self.cn, None, plot_snr_curves=False,
+                            plot_spectrum=False, wantSNR=wSNR, ref_lam = lammid)
+                t_ref_lam = etimes[-1]
+
+                # Re-do count rate calcs for fiducial spectrum
+                self.cn.run_count_rates(self.AHR, self.LAMHR, fstar)
+
+                # Draw random samples of data for a plot
+                self.cn.make_fake_data(texp=t_ref_lam)
+
+                if verbose: print(lammid, t_ref_lam)
+
+                # Plot
+                if plot:
+                    ax.axvspan(lammin, lammax, alpha = 0.2, color = cc[j])
+                    #ax.plot(self.cn.lam, self.cn.Cratio, ls = "steps-mid", color = "grey", zorder = 100)
+                    ax.plot(self.cn.lam, self.cn.Cobs, "o", ms = 3.0, alpha = 1.0, color = "w", zorder = 70)
+                    ax.errorbar(self.cn.lam, self.cn.Cobs, yerr=self.cn.Csig, fmt = "o", ms = 2.0, alpha = 0.7, color = "k", zorder = 70)
+                    ax.set_xlabel("Wavelength [$\mu$m]")
+                    ax.set_ylabel("$F_p / F_s$")
+
+                # Save values
+                t_tmp.append(t_ref_lam)
+                full_lam.append(self.cn.lam)
+                full_dlam.append(self.cn.dlam)
+                full_Cratio.append(self.cn.Cratio)
+                full_Cobs.append(self.cn.Cobs)
+                full_Csig.append(self.cn.Csig)
+
+                # Add time
+                if np.isfinite(t_ref_lam):
+                    t_chan[j] += t_ref_lam
+
+                ibp += 1
+
+            # Save tmp times per band
+            t_per_band_per_chan.append(t_tmp)
+
+        # Deal with the "two channels at a time" thing
+        t_tot = apply_two_channels(t_chan)
+
+        spectrum = (np.array(full_lam),
+                    np.array(full_dlam),
+                    np.array(full_Cratio),
+                    np.array(full_Cobs),
+                    np.array(full_Csig))
+        iwa = (pct_obs_iwa, lammax_obs_iwa)
+
+        if plot:
+            lam_extrema = np.array(lam_extrema)
+            self.cn.telescope.lammin = np.min(lam_extrema)
+            self.cn.telescope.lammax = np.max(lam_extrema)
+            self.cn.telescope.resolution = 140.
+            # Re-do count rate calcs for true Earth spectrum
+            self.cn.run_count_rates(self.AHR, self.LAMHR, self.FSTAR)
+            ax.plot(self.cn.lam, self.cn.Cratio, color = "grey", zorder = 80, lw = 3.0)
+            ax.plot(self.cn.lam, self.cn.Cratio, color = "w", zorder = 80, lw = 2.0)
+
+        return t_tot, t_per_band_per_chan, spectrum, iwa
+
     def generate_exptime_table(self, ):
         """
+        Calculate the exposure times and spectra in each bandpass for each
+        star in biased sample, make a Lookup Table of Exposure times for
+        each star in sample, and calculate the spectral completeness.
         """
 
         # Perform calculation for all stars in biased sample
@@ -133,15 +489,10 @@ class HEC_DRM(object):
             #print("HIP %i, %.2f pc, %s " %(hip[i], dist[i], stype[i]))
 
             # Set system parameters for this star
-            self.cn = prep_ith_star(self.cn, i)
+            self.prep_ith_star(i)
 
             # Calculate the time to observe the complete spectrum
-            t_tots[i], tpbpc, spectrum, iwa = complete_spectrum_time(self.cn, plot=False,
-                                                                     wantSNR = self.wantSNR,
-                                                                     Ahr_flat = self.Ahr_flat,
-                                                                     bandwidth = self.bandwidth,
-                                                                     architecture = self.architecture)
-
+            t_tots[i], tpbpc, spectrum, iwa = self.complete_spectrum_time()
 
             tpbpcs.append(tpbpc)
             pct_obs_iwas.append(iwa[0])
@@ -327,11 +678,12 @@ class HEC_DRM(object):
             ## 1 hour for slew + dynamic settle + thermal settle
             slew_settle_time = 1.0
             ## 0.6 for A (1.25 for B) hours for digging initial dark hole
-            if architecture == "A":
+            if self.architecture == "A":
                 initial_dark_hole_tax = 0.6
-            elif architecture == "B":
+            elif self.architecture == "B":
                 initial_dark_hole_tax = 1.25
             else:
+                print("`architecture` is unknown value in `run_hec_drm`")
                 initial_dark_hole_tax = np.nan
             ## GUESS: apply initial dark hole tax to each bandpass (flat tax * number of bandpasses used)
             dark_hole_time = initial_dark_hole_tax * np.sum(np.isfinite(tpbpcs_draws[i, val]))
@@ -385,14 +737,267 @@ class HEC_DRM(object):
             print("%.2f yrs for %i target's complete spectra with overheads (SNR=%.1f)" %(t_tot_sum / (24. * 356.), Ndraw, self.wantSNR))
             print("%.2f yrs for %i target's complete spectra just science time (SNR=%.1f)" %(t_sci_sum / (24. * 356.), Ndraw, self.wantSNR))
             print("%.2f yrs for %i target's complete spectra just overheads (SNR=%.1f)" %(t_ovr_sum / (24. * 356.), Ndraw, self.wantSNR))
-            print("%.2f yrs for %i target's UV spectra (SNR=%.1f)" %(np.nansum(tpbpcs_draws[:, val & (bp_chan == 0)]) / (24. * 356.), Ndraw, self.wantSNR))
-            print("%.2f yrs for %i target's optical spectra (SNR=%.1f)" %(np.nansum(tpbpcs_draws[:, val & (bp_chan == 1)]) / (24. * 356.), Ndraw, self.wantSNR))
-            print("%.2f yrs for %i target's NIR spectra (SNR=%.1f)" %(np.nansum(tpbpcs_draws[:, val & (bp_chan == 2)]) / (24. * 356.), Ndraw, self.wantSNR))
+            print("%.2f yrs for %i target's UV spectra (SNR=%.1f)" %(np.nansum(tpbpcs_draws[:, val & (self.bp_chan == 0)]) / (24. * 356.), Ndraw, self.wantSNR))
+            print("%.2f yrs for %i target's optical spectra (SNR=%.1f)" %(np.nansum(tpbpcs_draws[:, val & (self.bp_chan == 1)]) / (24. * 356.), Ndraw, self.wantSNR))
+            print("%.2f yrs for %i target's NIR spectra (SNR=%.1f)" %(np.nansum(tpbpcs_draws[:, val & (self.bp_chan == 2)]) / (24. * 356.), Ndraw, self.wantSNR))
             #print("%.2f yrs for %i target's O2 at 0.76 um (SNR=%i)" %(np.nansum(tpmbs[idraw,0,0]) / (24. * 356.), Ndraw, wantSNR_bands))
             #print("%.2f yrs for %i target's O3 at 0.6 um (SNR=%i)" %(np.nansum(tpmbs[idraw,1,0]) / (24. * 356.), Ndraw, wantSNR_bands))
             print("%i spectra in %i days (%i desired for program)" %(count_in_texp, texp_for_count, wantexp_days))
 
         return t_tot[isort], count_in_texp, c_tot[isort], tpbpcs_draws[isort, :], t_sci[isort], t_ovr[isort]
+
+    def plot_bp_exptimes(self, plot_spectrum = True, title = None, ylims = (1.0, 1e7),
+                         cc = ["C0", "C2", "C3"], iremove = []):
+        """
+        Plot the exposure time per bandpass for each bandpass
+        """
+
+        # Reshape exposure times
+        tmp = self.tpbpcs_rect.T
+
+        # Calculate clean spectrum
+        output = self.complete_spectrum_time()
+        spectrum = output[2]
+
+        fig, ax2 = plt.subplots(figsize = (16,5))
+
+        if title is not None:
+            ax2.set_title(title)
+
+        icount = 0
+        for ichan in range(len(CHANNELS)):
+
+            data = []
+            positions = []
+            widths = []
+
+            for j in range(len(self.bp_names[self.bp_chan == ichan])):
+
+                nanmask = np.isfinite(tmp[icount,:])
+
+                data.append(tmp[icount,nanmask])
+                positions.append(np.mean(spectrum[0][icount]))
+                widths.append(spectrum[0][icount][-1] - spectrum[0][icount][0] + np.mean(spectrum[1][icount][:]))
+                color1 = cc[ichan]
+
+                comp_str = "$%i \%%$" %(100.*self.frac_bias_bp[icount])
+                comp_str2 = "$\mathbf{%i \%%}$" %(100.*self.frac_bias_bp[icount])
+                #ax2.text(positions[j], np.median(tmp[icount,:]) + 5.*np.std(tmp[icount,:]), comp_str2,
+                #         ha = "center", va = "top", fontsize = 12, color = "w")
+                q_l, q_50, q_h, q_m, q_p = nsig_intervals(tmp[icount,nanmask], intvls=[0.05, 0.5, 0.97])
+                ax2.text(positions[j], q_h, comp_str2,
+                         ha = "center", va = "top", fontsize = 12, color = color1)
+
+                #ax2.plot(self.bandpasses[icount], [q_50, q_50], color = color1, zorder = 120, ls = "dashed")
+
+                icount += 1
+
+            positions = np.array(positions)
+            widths = np.array(widths)
+            bp1 = ax2.boxplot(data, sym = '', widths = widths, showfliers = False,
+                              boxprops = {"color" : color1, "alpha" : 0.5},
+                              whiskerprops = {"color" : color1, "linewidth" : 2.0},
+                              capprops = {"color" : color1, "linewidth" : 0.0},
+                              medianprops = {"color" : "w", "linewidth" : 2.0},
+                              patch_artist=True, positions = positions, whis = [5, 95]);
+
+            for patch in bp1['boxes']:
+                patch.set_facecolor(color1)
+
+        if plot_spectrum:
+
+            ax = ax2.twinx()
+            ax2.set_zorder(100)
+            ax2.patch.set_visible(False)
+
+            ax.set_xlabel("Wavelength [$\mu$m]")
+            ax.set_ylabel(r"Planet-Star Flux Ratio ($\times 10^{-10}$)", rotation = 270, labelpad = 25)
+            for i in range(len(self.bp_names)):
+                if i not in iremove:
+                    pass
+                    #ax.plot(spectrum[0][i], 1e10*spectrum[3][i], "o", ms = 4.0, alpha = 0.65, color = "w", zorder = 80)
+                    #ax.errorbar(spectrum[0][i], 1e10*spectrum[3][i], yerr=1e10*spectrum[4][i], fmt = "o", ms = 2.0, alpha = 0.65, color = "k", zorder = 80)
+                    #ax.axvspan(drmA.bandpasses[i][0], drmA.bandpasses[i][1], alpha = 0.2, color = cc[drmA.bp_chan[i]])
+
+            self.cn.telescope.lammin = 0.2
+            self.cn.telescope.lammax = 2.0
+            self.cn.telescope.resolution = 140.
+            # Re-do count rate calcs for true Earth spectrum
+            self.cn.run_count_rates(AHR, LAMHR, FSTAR)
+            l1, = ax.plot(self.cn.lam, 1e10*self.cn.Cratio, color = "purple", zorder = 0, lw = 4.0, alpha = 1.)
+            l2, = ax.plot(self.cn.lam, 1e10*self.cn.Cratio, color = "w", zorder = 0, lw = 2.0, alpha = 0.65)
+            ax.set_ylim(bottom=0.0)
+            ax.legend([(l1, l2)], [("Modern Earth")], framealpha = 0.0)
+
+            # Label Molecules
+            ax.text(0.27, 1.55, "O$_3$", ha = "center", va = "center")
+            ax.text(0.6, 1.25, "O$_3$", ha = "center", va = "center")
+            ax.text(0.68, 1.35, "O$_2$", ha = "center", va = "center")
+            ax.text(0.76, 1.45, "O$_2$", ha = "center", va = "center")
+            ax.text(0.96, 1.45, "H$_2$O", ha = "center", va = "center")
+            ax.text(1.15, 1.45, "H$_2$O", ha = "center", va = "center")
+            ax.text(1.4, 1.45, "H$_2$O", ha = "center", va = "center")
+            ax.text(1.9, 1.45, "H$_2$O", ha = "center", va = "center")
+            ax.text(1.6, 1.25, "CO$_2$", ha = "center", va = "center")
+
+        ax2.set_ylabel("Science Time [hrs]")
+        #ax2.set_title(r"All %i targets (S/N$\approx$%i)" %(Ndraw, wantSNR))
+        ax2.set_yscale("log")
+
+        ax2.set_xlabel("Wavelength [$\mu$m]")
+        ax2.set_ylim(bottom = ylims[0], top = ylims[1])
+
+        ax2.set_xticks([0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0])
+        ax2.set_xticklabels(["$0.2$", "$0.4$", "$0.6$", "$0.8$", "$1.0$", "$1.2$", "$1.4$", "$1.6$", "$1.8$", "$2.0$"])
+        ax2.set_xlim(0.1, 2.1)
+        #ax2.set_xlim(0.4, 1.0)
+
+        #fig.savefig("/Users/Jake/Dropbox/Astronomy/UW/Astrobio/Research Rotation/LUVOIR/figures/drm_bp10_science_time_%s.pdf" %drm.architecture, bbox_inches = "tight")
+
+        return fig
+
+    def plot_observed_spectrum(self, iremove = [], cc = ["C0", "C2", "C3"],
+                               yloc = 1.8, plot_boxes = False):
+        """
+        Plot the observed spectrum
+        """
+
+        bp_names = self.bp_names
+
+        # Set planet and star parameters for an Earth-Sun analog at 6pc
+        self.cn.planet.distance = 6.0
+        self.cn.planet.a = 1.0
+        self.cn.star.Rs = 1.0
+        self.cn.star.Teff = 5780.
+
+        """
+        wantSNR_grid = np.array([wantSNR for i in range(len(bp_names))])
+        wantSNR_grid[0] = 1.0
+        wantSNR_grid[1] = 1.0
+        """
+
+        output = self.complete_spectrum_time()
+        spectrum = output[2]
+
+        fig, ax = plt.subplots(figsize = (16,5))
+        ax.set_xlabel("Wavelength [$\mu$m]")
+        ax.set_ylabel(r"Planet-Star Flux Ratio ($\times 10^{-10}$)")
+        for i in range(len(bp_names)):
+            if i not in iremove:
+                ax.plot(spectrum[0][i], 1e10*spectrum[3][i], "o", ms = 4.0, alpha = 0.65, color = "w", zorder = 80)
+                ax.errorbar(spectrum[0][i], 1e10*spectrum[3][i], yerr=1e10*spectrum[4][i], fmt = "o", ms = 2.0, alpha = 0.65, color = "k", zorder = 80)
+                ax.axvspan(self.bandpasses[i][0], self.bandpasses[i][1], alpha = 0.2, color = cc[self.bp_chan[i]])
+
+        self.cn.telescope.lammin = 0.2
+        self.cn.telescope.lammax = 2.0
+        self.cn.telescope.resolution = 140.
+        # Re-do count rate calcs for true Earth spectrum
+        self.cn.run_count_rates(AHR, LAMHR, FSTAR)
+        ax.plot(self.cn.lam, 1e10*self.cn.Cratio, color = "purple", zorder = 70, lw = 4.0, alpha = 1.)
+        ax.plot(self.cn.lam, 1e10*self.cn.Cratio, color = "w", zorder = 70, lw = 2.0, alpha = 0.65)
+        ax.set_ylim(bottom=0.0)
+
+        # Label Molecules
+        ax.text(0.27, 1.55, "O$_3$",  ha = "center", va = "center", color = "k", zorder = 130)
+        ax.text(0.6, 1.45, "O$_3$",   ha = "center", va = "center", color = "k", zorder = 130)
+        ax.text(0.69, 1.35, "O$_2$",  ha = "center", va = "center", color = "k", zorder = 130)
+        ax.text(0.76, 1.65, "O$_2$",  ha = "center", va = "center", color = "k", zorder = 130)
+        ax.text(0.96, 1.65, "H$_2$O", ha = "center", va = "center", color = "k", zorder = 130)
+        ax.text(1.15, 1.45, "H$_2$O", ha = "center", va = "center", color = "k", zorder = 130)
+        ax.text(1.4, 1.45, "H$_2$O",  ha = "center", va = "center", color = "k", zorder = 130)
+        ax.text(1.9, 1.25, "H$_2$O",  ha = "center", va = "center", color = "k", zorder = 130)
+        ax.text(1.6, 1.25, "CO$_2$",  ha = "center", va = "center", color = "k", zorder = 130)
+
+        lammin_inst = self.bandpasses[self.bp_chan == 0][0][0]
+        lammax_inst = self.bandpasses[self.bp_chan == 0][-1][1]
+        xloc = (lammax_inst + lammin_inst) / 2
+        name = "UV"
+        color = cc[0]
+        bbox_fc = "w"
+        ax.annotate(s='', xy=(lammin_inst,yloc), xytext=(lammax_inst,yloc), arrowprops=dict(arrowstyle='<->', color=color, lw = 2.0), zorder=2)
+        ax.text(xloc, yloc, name, ha="center", va="bottom", color=color, zorder=99)#, bbox=dict(boxstyle="square", fc=bbox_fc, ec="none", zorder=2))
+
+        lammin_inst = self.bandpasses[self.bp_chan == 1][0][0]
+        lammax_inst = self.bandpasses[self.bp_chan == 1][-1][1]
+        xloc = (lammax_inst + lammin_inst) / 2
+        name = "visible"
+        color = cc[1]
+        bbox_fc = "w"
+        ax.annotate(s='', xy=(lammin_inst,yloc), xytext=(lammax_inst,yloc), arrowprops=dict(arrowstyle='<->', color=color, lw = 2.0), zorder=2)
+        ax.text(xloc, yloc, name, ha="center", va="bottom", color=color, zorder=99)#, bbox=dict(boxstyle="square", fc=bbox_fc, ec="none", zorder=2))
+
+        lammin_inst = self.bandpasses[self.bp_chan == 2][0][0]
+        lammax_inst = self.bandpasses[self.bp_chan == 2][-1][1]
+        xloc = (lammax_inst + lammin_inst) / 2
+        name = "NIR"
+        color = cc[2]
+        bbox_fc = "w"
+        ax.annotate(s='', xy=(lammin_inst,yloc), xytext=(lammax_inst,yloc), arrowprops=dict(arrowstyle='<->', color=color, lw = 2.0), zorder=2)
+        ax.text(xloc, yloc, name, ha="center", va="bottom", color=color, zorder=99)#, bbox=dict(boxstyle="square", fc=bbox_fc, ec="none", zorder=2))
+
+        if plot_boxes:
+
+            ax2 = ax.twinx()
+
+            """
+            Xdraw = len(tpbpcs_draws_tots[0][0])
+
+            # Transform quantities for boxplot
+            tmp = [np.zeros((len(tpbpcs_draws_tots[i]), Xdraw)) for i in range(len(spectroscopy.CHANNELS))]
+            for i in range(Xdraw):
+                for j in range(tp):
+                    for k in range(len(tpbpcs_draws_tots[j])):
+                        tmp[j][k,i] = tpbpcs_draws_tots[j][k][i]
+            """
+
+            icount = 0
+            for ichan in range(len(spectroscopy.CHANNELS)):
+
+                data = []
+                positions = []
+                widths = []
+
+                for j in range(len(bp_names[bp_chan == ichan])):
+
+                    data.append(tmp[icount,:])
+                    positions.append(np.mean(spectrum[0][icount]))
+                    widths.append(spectrum[0][icount][-1] - spectrum[0][icount][0] + np.mean(spectrum[1][icount][:]))
+                    color1 = cc[ichan]
+
+                    comp_str = "$%i \%%$" %(100.*frac_bias_bp[icount])
+                    comp_str2 = "$\mathbf{%i \%%}$" %(100.*frac_bias_bp[icount])
+                    #ax2.text(positions[j], np.median(tmp[icount,:]) + 5.*np.std(tmp[icount,:]), comp_str2,
+                    #         ha = "center", va = "top", fontsize = 12, color = "w")
+                    ax2.text(positions[j], np.median(tmp[icount,:]) + 5.*np.std(tmp[icount,:]), comp_str2,
+                             ha = "center", va = "top", fontsize = 12, color = color1)
+
+                    icount += 1
+
+                positions = np.array(positions)
+                widths = np.array(widths)
+                bp1 = ax2.boxplot(data, sym = '', widths = widths, showfliers = False,
+                                  boxprops = {"color" : color1, "alpha" : 0.5},
+                                  whiskerprops = {"color" : color1, "linewidth" : 2.0},
+                                  capprops = {"color" : color1, "linewidth" : 0.0},
+                                  medianprops = {"color" : "w", "linewidth" : 2.0},
+                                  patch_artist=True, positions = positions, whis = [5, 95]);
+
+                for patch in bp1['boxes']:
+                    patch.set_facecolor(color1)
+
+            ax2.set_ylabel("Science Time [hrs]", labelpad = 22, rotation = 270)
+            #ax2.set_title(r"All %i targets (S/N$\approx$%i)" %(Ndraw, wantSNR))
+            ax2.set_yscale("log")
+
+            ax2.set_xlabel("Wavelength [$\mu$m]")
+            ax2.set_ylim(bottom = 0.0)
+
+            ax2.set_xticks([0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0])
+            ax2.set_xticklabels([0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0])
+            ax2.set_xlim(0.1, 2.0)
+            #ax2.set_xlim(0.4, 1.0)
+
+        return fig, ax
 
 
 ################################################################################
@@ -818,6 +1423,8 @@ def prep_ith_star(cn, i):
 
     # Set system distance
     cn.planet.distance = STARS['dist'][i]
+
+    # CAN Set system number of exo-zodis here
 
     # Set stellar temperature
     cn.star.Teff = STARPROPS['temps'][imatch]
@@ -1312,6 +1919,30 @@ def remove_N_worst_bandpasses(tpbpcs, specs, completeness, t_tots, N = 1, verbos
                 print("%i step down: %.3f%% completeness in %.2f hours" %(j+1, new_completeness[j, i]*100, new_t_tots[j, i]))
 
     return new_t_tots, new_completeness, cur_tpbpcs, maxderivs
+
+def get_iremove(drm, Nremove_uv = 0, Nremove_nir = 0):
+    """
+    Convenience function for getting bandpass indices
+    to remove from exposure time estimates. Removes the
+    `Nremove_uv` shortest UV bandpasses, and the `Nremove_nir` longest
+    NIR bandpasses.
+
+    Parameters
+    ----------
+    drm : `HECDRM`
+        DRM object
+    Nremove_uv : int
+    Nremove_nir : int
+    """
+    iremove = []
+
+    ibp = np.arange(len(drm.bp_names))
+    iremove.append(ibp[drm.bp_chan == 0][:Nremove_uv])
+    if Nremove_nir > 0:
+        iremove.append(ibp[drm.bp_chan == 2][-Nremove_nir:])
+    iremove = np.hstack(iremove)
+
+    return iremove
 
 if __name__ == "__main__":
 
