@@ -78,8 +78,11 @@ class HEC_DRM(object):
         Flat planet albedo to use for SNR/exposure time estimates
     eta_int : float
         Fraction of targets in biased sample that appear to be habitable/interesting
-    bandwidth : float
-        Coronagraph bandpass bandwidth (:math:`\Delta \lambda / \lambda`)
+    bandwidth : float or list
+        Coronagraph bandpass bandwidth (:math:`\Delta \lambda / \lambda`). Can be
+        a single `float` value for the entire wavelength range, or a `list` of
+        floats, with one bandwidth for each channel
+        (where ``len(bandwidth) == len(CHANNELS)``).
     architecture : str
         LUVOIR architecture ("A" or "B")
     telescope_mods : dict
@@ -100,8 +103,8 @@ class HEC_DRM(object):
 
         # Read-in biased stellar catalog based on architecture
         self.STARS = read_luvoir_stars(path = os.path.join(HERE, '../inputs/luvoir-%s_stars.txt' %architecture))
-        self.biased_sample = self.STARS
-        self.NBIAS = len(self.biased_sample["dist"])
+        #self.biased_sample = self.STARS
+        #self.NBIAS = len(self.biased_sample["dist"])
 
         # Calculate the number of draws based on eta_int
         self.Ndraw = int(np.round(self.eta_int * self.NBIAS))
@@ -115,6 +118,20 @@ class HEC_DRM(object):
         self.FSTAR = FSTAR
 
         return
+
+    @property
+    def biased_sample(self):
+        """
+        Biased sample of exo-Earth candidates (this is for backwards
+        compatibility and simply returns the attribute `STARS`)
+        """
+        return self.STARS
+
+    @property
+    def NBIAS(self):
+        """
+        """
+        return len(self.STARS["dist"])
 
     def apply_telescope_mods(self):
         """
@@ -156,6 +173,11 @@ class HEC_DRM(object):
 
         # Set semi-major axis
         self.cn.planet.a = a_in
+
+        # Is the exozodi level defined for each star?
+        if "nez" in self.STARS.keys():
+            # Set exozodi level
+            self.cn.planet.Nez = self.STARS['nez'][i]
 
         # Set stellar spectrum based on type
         # Calculate stellar flux at TOA assuming a blackbody
@@ -344,6 +366,13 @@ class HEC_DRM(object):
         # Loop over telescope channels
         for j, channel in enumerate(CHANNELS):
 
+            # Channel dependent bandwidth?
+            if type(self.bandwidth) is float:
+                bandwidth = self.bandwidth
+            else:
+                assert len(self.bandwidth) == len(CHANNELS)
+                bandwidth = self.bandwidth[j]
+
             t_tmp = []
 
             # Get the channel specific telescope parameters
@@ -358,7 +387,7 @@ class HEC_DRM(object):
             lam_extrema.append(luvoir.lammax)
 
             # Calculate the bandpass edges
-            edges = calculate_bandpass_edges(luvoir.lammin, luvoir.lammax, bandwidth = self.bandwidth)
+            edges = calculate_bandpass_edges(luvoir.lammin, luvoir.lammax, bandwidth = bandwidth)
 
             # Calculate the number of bandpasses
             Nbands = len(edges) - 1
@@ -566,12 +595,19 @@ class HEC_DRM(object):
         # Loop over telescope channels
         for j, channel in enumerate(CHANNELS):
 
+            # Channel dependent bandwidth?
+            if type(self.bandwidth) is float:
+                bandwidth = self.bandwidth
+            else:
+                assert len(self.bandwidth) == len(CHANNELS)
+                bandwidth = self.bandwidth[j]
+
             # Get the channel specific telescope parameters
             luvoir = default_luvoir(channel=channel)
             self.cn.telescope = luvoir
 
             # Calculate the bandpass edges
-            edges = calculate_bandpass_edges(luvoir.lammin, luvoir.lammax, bandwidth = self.bandwidth)
+            edges = calculate_bandpass_edges(luvoir.lammin, luvoir.lammax, bandwidth = bandwidth)
 
             # Calculate the number of bandpasses
             Nbands = len(edges) - 1
@@ -1466,6 +1502,15 @@ def calculate_bandpass_edges(lammin, lammax, bandwidth = 0.2):
     """
     Calculate the wavelengths of the edges of bandpasses given a minimum and
     maximum wavelength for the channel and the bandwidth.
+
+    Parameters
+    ----------
+    lammin : float
+        Minimum wavelength
+    lammax : float
+        Maximum wavelength
+    bandwidth : float
+        Fractional bandwidth :math:`\Delta \lambda / \lambda`
 
     Returns
     -------
