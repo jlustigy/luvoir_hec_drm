@@ -31,7 +31,7 @@ import copy
 try:
     import coronagraph as cg
 except ImportError:
-    print("Failed to import `coronagraph`. Install from https://github.com/jlustigy/coronagraph")
+    print("Failed to import `coronagraph`. Please install: `pip install coronagraph`")
 
 
 import platform
@@ -53,11 +53,21 @@ else:
     mpl.rcParams['font.size'] = 25.0
     mpl.rc('text', usetex=False)
 
+# Local imports
+from luvoir_char import gen_candidate_catalog
+
 NCPU = multiprocessing.cpu_count()
 HERE = os.path.abspath(os.path.split(__file__)[0])
 
 CHANNELS = ["UV", "vis", "NIR"]
 LAMHR, AHR, FSTAR = cg.get_earth_reflect_spectrum()
+ARCHITECTURES = ["A (APLC)", "B (DMVC)", "B (PIAA)"]
+ARCH_FILES = [
+    "../inputs/LUVOIR-Architecture_A-LBTI_NOMINAL_2-NOMINAL_OCCRATES-APLC_3masks-AVC6-observations.csv",
+    "../inputs/LUVOIR-Architecture_B-LBTI_NOMINAL_2-NOMINAL_OCCRATES-DMVC6-observations.csv",
+    "../inputs/LUVOIR-Architecture_B-LBTI_NOMINAL_2-NOMINAL_OCCRATES-PIAA_mix-observations.csv"
+    ]
+
 
 ################################################################################
 # HEC DRM CLASS
@@ -90,7 +100,7 @@ class HEC_DRM(object):
     """
     def __init__(self, wantSNR=8.5, wantexp=365., Ahr_flat=0.20,
                  eta_int=0.1, bandwidth=0.2, architecture="A",
-                 telescope_mods={}):
+                 telescope_mods={}, catalog_seed = 1):
 
         # Set initial attributes
         self.wantSNR = wantSNR
@@ -100,9 +110,16 @@ class HEC_DRM(object):
         self.bandwidth = bandwidth
         self.architecture = architecture
         self.telescope_mods = telescope_mods
+        self.catalog_seed = catalog_seed
 
         # Read-in biased stellar catalog based on architecture
-        self.STARS = read_luvoir_stars(path = os.path.join(HERE, '../inputs/luvoir-%s_stars.txt' %architecture))
+        if (architecture == "A") or (architecture == "B"):
+            # Backwards compatibility with original results
+            self.STARS = read_luvoir_stars(path = os.path.join(HERE, '../inputs/luvoir-%s_stars.txt' %architecture))
+        elif architecture in ARCHITECTURES:
+            for i, arch in enumerate(ARCHITECTURES):
+                if architecture == arch:
+                    self.STARS = gen_candidate_catalog(os.path.join(HERE, ARCH_FILES[i]), seed = self.catalog_seed)
         #self.biased_sample = self.STARS
         #self.NBIAS = len(self.biased_sample["dist"])
 
@@ -130,6 +147,9 @@ class HEC_DRM(object):
     @property
     def NBIAS(self):
         """
+        Number of targets in the biased sample of exo-Earth candidates
+        (this is for backwards compatibility and simply returns the
+        attribute `len(STARS["dist"])`)
         """
         return len(self.STARS["dist"])
 
@@ -714,9 +734,9 @@ class HEC_DRM(object):
             ## 1 hour for slew + dynamic settle + thermal settle
             slew_settle_time = 1.0
             ## 0.6 for A (1.25 for B) hours for digging initial dark hole
-            if self.architecture == "A":
+            if self.architecture.lower().startswith("a"):
                 initial_dark_hole_tax = 0.6
-            elif self.architecture == "B":
+            elif self.architecture.lower().startswith("b"):
                 initial_dark_hole_tax = 1.25
             else:
                 print("`architecture` is unknown value in `run_hec_drm`")
@@ -1048,7 +1068,7 @@ def default_luvoir(architecture = "A", channel = "vis"):
     telescope = cg.Telescope()
 
     # Set paramaters for Architecture A
-    if (architecture.lower() == "A".lower()):
+    if architecture.lower().startswith("a"):
         telescope.diameter = 15.0
         telescope.contrast = 1e-10
         telescope.A_collect = 155.2
@@ -1088,7 +1108,7 @@ def default_luvoir(architecture = "A", channel = "vis"):
             return None
 
     # Set paramaters for Architecture B
-    elif (architecture.lower() == "B".lower()):
+    elif architecture.lower().startswith("b"):
         telescope.diameter = 8.0
         telescope.contrast = 1e-10
         telescope.A_collect = 43.4
@@ -1228,6 +1248,14 @@ def match_stellar_type(s, verbose = True):
         if s+"V" == st:
             if verbose: print("Using %s for %s" %(st, s))
             return i
+
+    # Case: between type (e.g. use M3V for M3.5V)
+    for i, st in enumerate(stypes):
+        if s.split(".")[0]+"V" == st:
+            if verbose: print("Using %s for %s" %(st, s))
+            return i
+
+    print("ERROR for `%s` spectral type not matched" %s)
 
 def calc_seff(Teff, S0, coeffs):
     """
