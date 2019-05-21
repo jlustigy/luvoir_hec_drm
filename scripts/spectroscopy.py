@@ -61,11 +61,11 @@ HERE = os.path.abspath(os.path.split(__file__)[0])
 
 CHANNELS = ["UV", "vis", "NIR"]
 LAMHR, AHR, FSTAR = cg.get_earth_reflect_spectrum()
-ARCHITECTURES = ["A (APLC)", "B (DMVC)", "B (PIAA)"]
+ARCHITECTURES = ["APLC", "DMVC", "PIAA"]
 ARCH_FILES = [
-    "../inputs/LUVOIR-Architecture_A-LBTI_NOMINAL_2-NOMINAL_OCCRATES-APLC_3masks-AVC6-observations.csv",
-    "../inputs/LUVOIR-Architecture_B-LBTI_NOMINAL_2-NOMINAL_OCCRATES-DMVC6-observations.csv",
-    "../inputs/LUVOIR-Architecture_B-LBTI_NOMINAL_2-NOMINAL_OCCRATES-PIAA_mix-observations.csv"
+    "../inputs/LUVOIR-Architecture_A-LBTI_NOMINAL_2-NOMINAL_OCCRATES-APLC_3masks-AVC6-target_list.csv",
+    "../inputs/LUVOIR-Architecture_B-LBTI_NOMINAL_2-NOMINAL_OCCRATES-DMVC6-target_list.csv",
+    "../inputs/LUVOIR-Architecture_B-LBTI_NOMINAL_2-NOMINAL_OCCRATES-PIAA_mix-target_list.csv"
     ]
 
 
@@ -116,9 +116,9 @@ class HEC_DRM(object):
         if (architecture == "A") or (architecture == "B"):
             # Backwards compatibility with original results
             self.STARS = read_luvoir_stars(path = os.path.join(HERE, '../inputs/luvoir-%s_stars.txt' %architecture))
-        elif architecture in ARCHITECTURES:
+        else:
             for i, arch in enumerate(ARCHITECTURES):
-                if architecture == arch:
+                if arch.lower() in architecture.lower():
                     self.STARS = gen_candidate_catalog(os.path.join(HERE, ARCH_FILES[i]), seed = self.catalog_seed)
         #self.biased_sample = self.STARS
         #self.NBIAS = len(self.biased_sample["dist"])
@@ -173,7 +173,7 @@ class HEC_DRM(object):
         """
 
         # Get index with matching stellar type in stellar properties table
-        imatch = match_stellar_type(self.STARS['stype'][i], verbose = False)
+        imatch = match_stellar_type(self.STARS['stype'][i], verbose = True)
 
         # Set system distance
         self.cn.planet.distance = self.STARS['dist'][i]
@@ -659,6 +659,14 @@ class HEC_DRM(object):
         self.tot_completeness = tot_completeness
         self.frac_bias_bp = frac_bias_bp
 
+        self._make_pandas_table()
+
+        return
+
+    def _make_pandas_table(self):
+        """
+        """
+
         # Make a pandas table for lookup
         data = np.vstack([self.biased_sample["hip"],
                   self.biased_sample["stype"],
@@ -841,7 +849,7 @@ class HEC_DRM(object):
                 #ax2.text(positions[j], np.median(tmp[icount,:]) + 5.*np.std(tmp[icount,:]), comp_str2,
                 #         ha = "center", va = "top", fontsize = 12, color = "w")
                 q_l, q_50, q_h, q_m, q_p = nsig_intervals(tmp[icount,nanmask], intvls=[0.05, 0.5, 0.97])
-                ax2.text(positions[j], q_h, comp_str2,
+                ax2.text(positions[j], ylims[1], comp_str2,
                          ha = "center", va = "top", fontsize = 12, color = color1)
 
                 #ax2.plot(self.bandpasses[icount], [q_50, q_50], color = color1, zorder = 120, ls = "dashed")
@@ -1150,12 +1158,53 @@ def default_luvoir(architecture = "A", channel = "vis"):
         print("Unknown `architecture`")
         return None
 
-    # Set wavelength-dependent throughput
+    # Set wavelength-dependent throughput for the optics
     tpath = os.path.join(HERE, "../inputs/optical_throughput.txt")
     data = np.genfromtxt(tpath, skip_header=1)
     midlamt = 1e-3 * data[:,2]
     Tput_optics = data[:,3]
     telescope.Tput_lam = (midlamt, Tput_optics)
+
+    # Specify type of coronagraph:
+    # set separation (lam/D) dependent throughput and contrast based on
+    if "aplc" in architecture.lower():
+        try:
+            # Extract the int following the coronagraph name
+            imask = int(architecture.lower().split("aplc")[-1][:-1])
+        except ValueError:
+            imask = 1
+        # Read-in APLC files
+        c_aplc = np.loadtxt(os.path.join(HERE, "../inputs/LUVOIR_coronagraphs/APLC_Contrast%i.txt" %imask), skiprows=1)
+        t_aplc = np.loadtxt(os.path.join(HERE, "../inputs/LUVOIR_coronagraphs/APLC_Throughput%i.txt" %imask), skiprows=1)
+        # Set quantities for coronagraph
+        telescope.C_sep = (c_aplc[:,0], c_aplc[:,1])
+        telescope.Tput_sep = (t_aplc[:,0], t_aplc[:,1])
+    elif "dmvc" in architecture.lower():
+        try:
+            # Extract the int following the coronagraph name
+            imask = int(architecture.lower().split("dmvc")[-1][:-1])
+        except ValueError:
+            imask = 1
+        # Read-in DMVC files
+        c_dmvc = np.loadtxt(os.path.join(HERE, "../inputs/LUVOIR_coronagraphs/DMVC_Contrast%s.txt" %imask), skiprows=1)
+        t_dmvc = np.loadtxt(os.path.join(HERE, "../inputs/LUVOIR_coronagraphs/DMVC_Throughput%s.txt" %imask), skiprows=1)
+        # Set quantities for coronagraph
+        telescope.C_sep = (c_dmvc[:,0], c_dmvc[:,1])
+        telescope.Tput_sep = (t_dmvc[:,0], t_dmvc[:,1])
+    elif "piaa" in architecture.lower():
+        try:
+            # Extract the int following the coronagraph name
+            imask = int(architecture.lower().split("piaa")[-1][:-1])
+        except ValueError:
+            imask = 1
+        # Read-in PIAA files
+        c_piaa = np.loadtxt(os.path.join(HERE, "../inputs/LUVOIR_coronagraphs/PIAA_Contrast%i.txt" %imask), skiprows=1)
+        t_piaa = np.loadtxt(os.path.join(HERE, "../inputs/LUVOIR_coronagraphs/PIAA_Throughput%i.txt" %imask), skiprows=1)
+        # Set quantities for coronagraph
+        telescope.C_sep = (c_piaa[:,0], c_piaa[:,1])
+        telescope.Tput_sep = (t_piaa[:,0], t_piaa[:,1])
+    else:
+        pass
 
     return telescope
 

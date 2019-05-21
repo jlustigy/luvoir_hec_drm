@@ -10,7 +10,7 @@ import pandas as pd
 
 __all__ = ["gen_candidate_catalog"]
 
-def gen_candidate_catalog(path, seed = None):
+def gen_candidate_catalog(path, seed = None, return_full_cat = False):
     """
     Read in file of observations from Chris Stark's LUVOIR DRM and use it to
     calculate the biased sample catalog of exo-Earth candidate targets for
@@ -23,6 +23,9 @@ def gen_candidate_catalog(path, seed = None):
     seed : int or NoneType
         Seed for random number generator. Defaults to `None` for true randomness.
         Set to integer for repeatable randomness.
+    return_full_cat : bool
+        Set to return the entire target catalog without performing q biased
+        draw from the exoEarth candidate yields.
 
     Returns
     -------
@@ -44,7 +47,7 @@ def gen_candidate_catalog(path, seed = None):
     obs = len(df["HIP"])
 
     # Calculate the actual spectral characterization time for exoEarths
-    spec_time = df["Spec char time (days)"].values / df["exoEarth candidate yield"].values
+    spec_time = df["Total Spec Char Time (days)"].values / df["Total EEC Yield"].values
 
     """
     # Find "brightest" targets by sorting spect time
@@ -69,6 +72,7 @@ def gen_candidate_catalog(path, seed = None):
     dist_arr = []
     type_arr = []
     nezodi_arr = []
+    eec_yield = []
 
     # Set RNG seed
     np.random.seed(seed)
@@ -79,14 +83,14 @@ def gen_candidate_catalog(path, seed = None):
     # Start a counting variable
     count = 0
 
-    # Loop over all observations in catalog
+    # Loop over all targets in catalog
     for i in range(obs):
 
         # Get random number from a uniform distribution between 0-1
         rand = rands[i]
 
         # If the staistical yield exceeds the random number:
-        if df["exoEarth candidate yield"].iloc[i] >= rand:
+        if (df["Total EEC Yield"].iloc[i] >= rand) or return_full_cat:
 
             # Append quantities to lists
             deep_time_arr.append(spec_time[i])
@@ -94,6 +98,7 @@ def gen_candidate_catalog(path, seed = None):
             dist_arr.append(df["dist (pc)"].iloc[i])
             type_arr.append(df["Type"].iloc[i])
             nezodi_arr.append(df["nexozodis (zodis)"].iloc[i])
+            eec_yield.append(df["Total EEC Yield"].iloc[i])
 
             # Increment count
             count += 1
@@ -104,6 +109,7 @@ def gen_candidate_catalog(path, seed = None):
     dist_arr = np.array(dist_arr)
     type_arr = np.array(type_arr)
     nezodi_arr = np.array(nezodi_arr)
+    eec_yield = np.array(eec_yield)
 
     # Total results
     tot_deep_time_arr = np.sum(deep_time_arr)
@@ -116,7 +122,8 @@ def gen_candidate_catalog(path, seed = None):
         "stype" : type_arr,
         "nez" : nezodi_arr,
         "total count" : count,
-        "total deep time" : tot_deep_time_arr
+        "total deep time" : tot_deep_time_arr,
+        "eec yield" : eec_yield
     }
 
     return dic
