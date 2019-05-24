@@ -1085,6 +1085,7 @@ def default_luvoir(architecture = "A", channel = "vis"):
         telescope.OWA = 64.
         telescope.qe = 0.9 * 0.75   # Detector QE * charge transfer term
         if channel.lower() == "vis".lower():
+            # Visible channel parameters:
             telescope.IWA = 3.5
             telescope.resolution = 140.
             telescope.throughput = 0.18
@@ -1092,8 +1093,9 @@ def default_luvoir(architecture = "A", channel = "vis"):
             telescope.readnoise = 0.0
             telescope.lammin = 0.515
             telescope.lammax = 1.030
-            telescope.Rc = 1.3e-3
+            telescope.Rc = 1.3e-3     # Clock induced charge [counts/pixel/photon]
         elif channel.lower() == "UV".lower():
+            # UV channel parameters:
             telescope.IWA = 4.0
             telescope.resolution = 7.
             telescope.throughput = 0.18
@@ -1101,8 +1103,9 @@ def default_luvoir(architecture = "A", channel = "vis"):
             telescope.readnoise = 0.0
             telescope.lammin = 0.2
             telescope.lammax = 0.525
-            telescope.Rc = 1.3e-3
+            telescope.Rc = 1.3e-3     # Clock induced charge [counts/pixel/photon]
         elif channel.lower() == "NIR".lower():
+            # NIR channel parameters:
             telescope.IWA = 3.5
             telescope.resolution = 70.
             telescope.throughput = 0.18
@@ -1110,7 +1113,7 @@ def default_luvoir(architecture = "A", channel = "vis"):
             telescope.readnoise = 2.5
             telescope.lammin = 1.0
             telescope.lammax = 2.0
-            telescope.Rc = 0.0
+            telescope.Rc = 0.0       # Clock induced charge [counts/pixel/photon]
         else:
             print("Unknown `channel`")
             return None
@@ -1125,6 +1128,7 @@ def default_luvoir(architecture = "A", channel = "vis"):
         telescope.OWA = 64.
         telescope.qe = 0.9 * 0.75   # Detector QE * charge transfer term
         if channel.lower() == "vis".lower():
+            # Visible channel parameters:
             telescope.IWA = 2.0
             telescope.resolution = 140.
             telescope.throughput = 0.48
@@ -1132,8 +1136,9 @@ def default_luvoir(architecture = "A", channel = "vis"):
             telescope.readnoise = 0.0
             telescope.lammin = 0.515
             telescope.lammax = 1.030
-            telescope.Rc = 1.3e-3
+            telescope.Rc = 1.3e-3     # Clock induced charge [counts/pixel/photon]
         elif channel.lower() == "UV".lower():
+            # UV channel parameters:
             telescope.IWA = 4.0
             telescope.resolution = 7.
             telescope.throughput = 0.48
@@ -1141,8 +1146,9 @@ def default_luvoir(architecture = "A", channel = "vis"):
             telescope.readnoise = 0.0
             telescope.lammin = 0.200
             telescope.lammax = 0.525
-            telescope.Rc = 1.3e-3
+            telescope.Rc = 1.3e-3     # Clock induced charge [counts/pixel/photon]
         elif channel.lower() == "NIR".lower():
+            # NIR channel parameters:
             telescope.IWA = 2.0
             telescope.resolution = 70.
             telescope.throughput = 0.48
@@ -1150,7 +1156,7 @@ def default_luvoir(architecture = "A", channel = "vis"):
             telescope.readnoise = 2.5
             telescope.lammin = 1.00
             telescope.lammax = 2.00
-            telescope.Rc = 0.0
+            telescope.Rc = 0.0       # Clock induced charge [counts/pixel/photon]
         else:
             print("Unknown `channel`")
             return None
