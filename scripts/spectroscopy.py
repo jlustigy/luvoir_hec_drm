@@ -129,7 +129,7 @@ class HEC_DRM(object):
         # Create coronagraph noise object for calculations
         self.cn = cg.CoronagraphNoise(SILENT = True)
 
-        # Set a fiducial modern earth spectrum for plotting
+        # Set a fiducial spectrum for plotting
         self.LAMHR = LAMHR
         self.AHR = AHR
         self.FSTAR = FSTAR
@@ -845,12 +845,15 @@ class HEC_DRM(object):
                 color1 = cc[ichan]
 
                 comp_str = "$%i \%%$" %(100.*self.frac_bias_bp[icount])
-                comp_str2 = "$\mathbf{%i \%%}$" %(100.*self.frac_bias_bp[icount])
+                comp_str2 = "$\mathbf{%i {\%%}}$" %(100.*self.frac_bias_bp[icount])
+                comp_str3 = "$\mathbf{%i}$" %(100.*self.frac_bias_bp[icount])
                 #ax2.text(positions[j], np.median(tmp[icount,:]) + 5.*np.std(tmp[icount,:]), comp_str2,
                 #         ha = "center", va = "top", fontsize = 12, color = "w")
-                q_l, q_50, q_h, q_m, q_p = nsig_intervals(tmp[icount,nanmask], intvls=[0.05, 0.5, 0.97])
-                ax2.text(positions[j], ylims[1], comp_str2,
-                         ha = "center", va = "top", fontsize = 12, color = color1)
+                q_l, q_50, q_h, q_m, q_p = nsig_intervals(tmp[icount,nanmask], intvls=[0.25, 0.5, 0.75])
+                #ax2.text(positions[j], ylims[1], comp_str2,
+            #             ha = "center", va = "top", color = color1, fontsize = 12)
+                ax2.text(positions[j], q_50 + q_p, comp_str3,
+                         ha = "center", va = "bottom", color = color1)
 
                 #ax2.plot(self.bandpasses[icount], [q_50, q_50], color = color1, zorder = 120, ls = "dashed")
 
@@ -887,7 +890,7 @@ class HEC_DRM(object):
             self.cn.telescope.lammax = 2.0
             self.cn.telescope.resolution = 140.
             # Re-do count rate calcs for true Earth spectrum
-            self.cn.run_count_rates(AHR, LAMHR, FSTAR)
+            self.cn.run_count_rates(self.AHR, self.LAMHR, self.FSTAR)
             l1, = ax.plot(self.cn.lam, 1e10*self.cn.Cratio, color = "purple", zorder = 0, lw = 4.0, alpha = 1.)
             l2, = ax.plot(self.cn.lam, 1e10*self.cn.Cratio, color = "w", zorder = 0, lw = 2.0, alpha = 0.65)
             ax.set_ylim(bottom=0.0)
@@ -921,7 +924,7 @@ class HEC_DRM(object):
         return fig
 
     def plot_observed_spectrum(self, iremove = [], cc = ["C0", "C2", "C3"],
-                               yloc = 1.8, plot_boxes = False):
+                               yloc = 1.8, plot_boxes = False, label_molecules = True):
         """
         Plot the observed spectrum
         """
@@ -956,21 +959,22 @@ class HEC_DRM(object):
         self.cn.telescope.lammax = 2.0
         self.cn.telescope.resolution = 140.
         # Re-do count rate calcs for true Earth spectrum
-        self.cn.run_count_rates(AHR, LAMHR, FSTAR)
+        self.cn.run_count_rates(self.AHR, self.LAMHR, self.FSTAR)
         ax.plot(self.cn.lam, 1e10*self.cn.Cratio, color = "purple", zorder = 70, lw = 4.0, alpha = 1.)
         ax.plot(self.cn.lam, 1e10*self.cn.Cratio, color = "w", zorder = 70, lw = 2.0, alpha = 0.65)
         ax.set_ylim(bottom=0.0)
 
         # Label Molecules
-        ax.text(0.27, 1.55, "O$_3$",  ha = "center", va = "center", color = "k", zorder = 130)
-        ax.text(0.6, 1.45, "O$_3$",   ha = "center", va = "center", color = "k", zorder = 130)
-        ax.text(0.69, 1.35, "O$_2$",  ha = "center", va = "center", color = "k", zorder = 130)
-        ax.text(0.76, 1.65, "O$_2$",  ha = "center", va = "center", color = "k", zorder = 130)
-        ax.text(0.96, 1.65, "H$_2$O", ha = "center", va = "center", color = "k", zorder = 130)
-        ax.text(1.15, 1.45, "H$_2$O", ha = "center", va = "center", color = "k", zorder = 130)
-        ax.text(1.4, 1.45, "H$_2$O",  ha = "center", va = "center", color = "k", zorder = 130)
-        ax.text(1.9, 1.25, "H$_2$O",  ha = "center", va = "center", color = "k", zorder = 130)
-        ax.text(1.6, 1.25, "CO$_2$",  ha = "center", va = "center", color = "k", zorder = 130)
+        if label_molecules:
+            ax.text(0.27, 1.55, "O$_3$",  ha = "center", va = "center", color = "k", zorder = 130)
+            ax.text(0.6, 1.45, "O$_3$",   ha = "center", va = "center", color = "k", zorder = 130)
+            ax.text(0.69, 1.35, "O$_2$",  ha = "center", va = "center", color = "k", zorder = 130)
+            ax.text(0.76, 1.65, "O$_2$",  ha = "center", va = "center", color = "k", zorder = 130)
+            ax.text(0.96, 1.65, "H$_2$O", ha = "center", va = "center", color = "k", zorder = 130)
+            ax.text(1.15, 1.45, "H$_2$O", ha = "center", va = "center", color = "k", zorder = 130)
+            ax.text(1.4, 1.45, "H$_2$O",  ha = "center", va = "center", color = "k", zorder = 130)
+            ax.text(1.9, 1.25, "H$_2$O",  ha = "center", va = "center", color = "k", zorder = 130)
+            ax.text(1.6, 1.25, "CO$_2$",  ha = "center", va = "center", color = "k", zorder = 130)
 
         lammin_inst = self.bandpasses[self.bp_chan == 0][0][0]
         lammax_inst = self.bandpasses[self.bp_chan == 0][-1][1]
