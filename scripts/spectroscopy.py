@@ -924,7 +924,8 @@ class HEC_DRM(object):
         return fig
 
     def plot_observed_spectrum(self, iremove = [], cc = ["C0", "C2", "C3"],
-                               yloc = 1.8, plot_boxes = False, label_molecules = True):
+                               yloc = 1.8, plot_boxes = False, label_molecules = True,
+                               show_bandpasses = True):
         """
         Plot the observed spectrum
         """
@@ -953,7 +954,8 @@ class HEC_DRM(object):
             if i not in iremove:
                 ax.plot(spectrum[0][i], 1e10*spectrum[3][i], "o", ms = 4.0, alpha = 0.65, color = "w", zorder = 80)
                 ax.errorbar(spectrum[0][i], 1e10*spectrum[3][i], yerr=1e10*spectrum[4][i], fmt = "o", ms = 2.0, alpha = 0.65, color = "k", zorder = 80)
-                ax.axvspan(self.bandpasses[i][0], self.bandpasses[i][1], alpha = 0.2, color = cc[self.bp_chan[i]])
+                if show_bandpasses:
+                    ax.axvspan(self.bandpasses[i][0], self.bandpasses[i][1], alpha = 0.2, color = cc[self.bp_chan[i]])
 
         self.cn.telescope.lammin = 0.2
         self.cn.telescope.lammax = 2.0
@@ -984,6 +986,7 @@ class HEC_DRM(object):
         bbox_fc = "w"
         ax.annotate(s='', xy=(lammin_inst,yloc), xytext=(lammax_inst,yloc), arrowprops=dict(arrowstyle='<->', color=color, lw = 2.0), zorder=2)
         ax.text(xloc, yloc, name, ha="center", va="bottom", color=color, zorder=99)#, bbox=dict(boxstyle="square", fc=bbox_fc, ec="none", zorder=2))
+        if not show_bandpasses: ax.axvspan(lammin_inst, lammax_inst, alpha = 0.2, color = color)
 
         lammin_inst = self.bandpasses[self.bp_chan == 1][0][0]
         lammax_inst = self.bandpasses[self.bp_chan == 1][-1][1]
@@ -993,6 +996,7 @@ class HEC_DRM(object):
         bbox_fc = "w"
         ax.annotate(s='', xy=(lammin_inst,yloc), xytext=(lammax_inst,yloc), arrowprops=dict(arrowstyle='<->', color=color, lw = 2.0), zorder=2)
         ax.text(xloc, yloc, name, ha="center", va="bottom", color=color, zorder=99)#, bbox=dict(boxstyle="square", fc=bbox_fc, ec="none", zorder=2))
+        if not show_bandpasses: ax.axvspan(lammin_inst, lammax_inst, alpha = 0.2, color = color)
 
         lammin_inst = self.bandpasses[self.bp_chan == 2][0][0]
         lammax_inst = self.bandpasses[self.bp_chan == 2][-1][1]
@@ -1002,6 +1006,7 @@ class HEC_DRM(object):
         bbox_fc = "w"
         ax.annotate(s='', xy=(lammin_inst,yloc), xytext=(lammax_inst,yloc), arrowprops=dict(arrowstyle='<->', color=color, lw = 2.0), zorder=2)
         ax.text(xloc, yloc, name, ha="center", va="bottom", color=color, zorder=99)#, bbox=dict(boxstyle="square", fc=bbox_fc, ec="none", zorder=2))
+        if not show_bandpasses: ax.axvspan(lammin_inst, lammax_inst, alpha = 0.2, color = color)
 
         if plot_boxes:
 

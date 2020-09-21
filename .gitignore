@@ -2,3 +2,5 @@
 *.ipynb_checkpoints
 *.pyc
 *.gc
+plots/*
+!plots/README.md
